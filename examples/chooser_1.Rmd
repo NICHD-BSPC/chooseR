@@ -12,6 +12,7 @@ knitr::opts_chunk$set(echo = TRUE)
 Ensure getting all the packages in `chooser/requirements.txt` installed and running `activate conda ./env`
 
 ```{r packages_and_functions, include=FALSE}
+library(tidyverse)
 library(ggplot2)
 library(Signac)
 library(Seurat)
