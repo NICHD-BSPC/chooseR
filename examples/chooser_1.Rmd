@@ -1,5 +1,5 @@
 ---
-title: "chooseR"
+title: "chooseR - part 1"
 output: html_document
 ---
 
@@ -15,9 +15,10 @@ Ensure getting all the packages in `chooser/requirements.txt` installed and runn
 library(ggplot2)
 library(Signac)
 library(Seurat)
+library(knitr)
 
-source('../common.R')
-source("R/pipeline.R")
+source('/data/BSPC-Petros/multiome-mira/common.R')
+source("/data/BSPC-Petros/multiome-mira/chooser/R/pipeline.R")
 ```
 
 
@@ -38,7 +39,8 @@ DefaultAssay(obj) <- "Gene.Expression"
 obj <- RenameAssays(obj, Gene.Expression="RNA")
 
 # Explore the output
-cat(obj)
+obj
+
 
 
 ```
@@ -52,7 +54,7 @@ cat(obj)
 exp_counts <- obj@assays$RNA@counts
 
 # Explore the count matrix
-exp_counts[1:5, 1:5]
+kable(exp_counts[1:5, 1:5])
 
 # Replace 0 counts to 0.01
 exp_counts[exp_counts == 0] <- 0.01
@@ -171,6 +173,12 @@ for (res in resolutions) {
 }
 
 
+```
+
+## Prepare plotting
+
+```{r}
+
 
 # Create silhouette plot
 # Read in scores and calculate CIs
@@ -178,6 +186,8 @@ scores <- purrr::map(
   paste0(results_path, "silhouette_grouped_", resolutions, ".rds"),
   readRDS
 )
+
+
 
 
 scores <- dplyr::bind_rows(scores) %>%
@@ -293,7 +303,7 @@ ggsave(
 
 # Save original data, with ground truth labels
 saveRDS(obj, paste0(results_path, "clustered_data.rds"))
-print('Done saving seurat object.')
+cat('Done saving seurat object.')
 
 ```
 
