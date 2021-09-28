@@ -1,0 +1,559 @@
+---
+title: "chooseR"
+output:
+    html_document:
+        keep_md: yes
+        toc_float: true
+        toc: true
+        code_folding: hide
+
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning=FALSE,
+                      message=FALSE,
+                      results='hide',
+                      echo=FALSE)
+```
+
+## Activate conda env
+
+Ensure getting all the packages in `requirements.txt` installed and running `activate conda ./env`
+
+```{r packages_and_functions, include=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(Signac)
+library(Seurat)
+library(knitr)
+library(Matrix)
+
+# Set correct paths
+source("/data/BSPC-Petros/multiome-mira/chooser/R/var.R")
+```
+
+
+## Load Seurat object
+
+- **Input data** = RDS file storing a **seurat object** (before SCTransform & PCA)
+
+
+```{r load_data}
+
+# Read a QC-ed seuat object
+obj <- readRDS(rds_path)
+
+# Move active assay to Gene.Expression
+# Satija's naming
+if ("RNA" %in% names(obj)) {
+    DefaultAssay(obj) <- "RNA"
+
+    # Chris' naming
+} else if ("Gene.Expression" %in% names(obj)) {
+    DefaultAssay(obj) <- "Gene.Expression"
+    obj <- RenameAssays(obj, Gene.Expression="RNA")
+}
+
+
+
+
+# Explore the output
+obj
+
+
+
+```
+
+## Run SCTransform
+
+
+```{r sctransform}
+
+# Add pseudocount 0.01 to seurat's expression count matrix
+# (avoids errors from missing or infinite values)
+obj@assays$RNA@counts <- as(obj@assays$RNA@counts + 0.01,  # adds pseudocount
+                            "dgCMatrix")                   # coerces to the original matrix type (dgCMatrix)
+
+
+# Explore the output
+kable(obj@assays$RNA@counts[1:5, 1:3])
+
+
+
+# Run SCTransform
+obj <- SCTransform(obj)
+
+
+# Explore the matrix
+obj
+
+```
+
+## Run PCA
+
+
+```{r pca}
+
+
+
+# Run PCA
+obj <- RunPCA(obj)
+
+```
+
+## Set variables
+
+```{r set_variables}
+
+# Define the number of PCs to use, and which assay and reduction to use.
+# We recommend testing a broad range of resolutions
+# For more on picking the correct number of PCs, see:
+# https://satijalab.org/seurat/v3.1/pbmc3k_tutorial.html
+npcs <- obj@commands$RunPCA.SCT@params$npcs
+assay <- "SCT"
+reduction <- "pca"
+
+# Create a directory for output plots
+system(paste0("mkdir ", results_path))
+
+
+```
+
+## Run chooseR
+
+- **Input = seurat object (after SCTransform and PCA)**
+
+
+```{r chooser}
+
+# Run pipeline
+for (res in resolutions) {
+  message(paste0("Clustering ", res, "..."))
+  message("\tFinding ground truth...")
+
+  # "Truths" will be stored at glue::glue("{reduction}.{assay}_res.{res}")
+  obj <- find_clusters(obj,
+                       npcs=npcs,
+                       reduction = reduction,
+                       assay = assay,
+                       resolution = res
+  )
+  clusters <- obj[[glue::glue("{reduction}.{assay}_res.{res}")]]
+
+  # Now perform iterative, sub-sampled clusters
+  results <- multiple_cluster(obj,
+                              n = nIter,
+                              size = 0.8,
+                              npcs = npcs,
+                              res = res,
+                              reduction = reduction,
+                              assay = assay
+  )
+
+  # Now calculate the co-clustering frequencies
+  message(paste0("Tallying ", res, "..."))
+  # This is the more time efficient vectorisation
+  # However, it exhausts vector memory for (nearly) all datasets
+  # matches <- purrr::map(columns, find_matches, df = results)
+  # matches <- purrr::reduce(matches, `+`)
+  columns <- colnames(dplyr::select(results, -cell))
+  mtchs <- matrix(0, nrow = dim(results)[1], ncol = dim(results)[1])
+  i <- 1 # Counter
+  for (col in columns) {
+    message(paste0("\tRound ", i, "..."))
+    mtchs <- Reduce("+", list(
+      mtchs,
+      find_matches(col, df = results)
+    ))
+    i <- i + 1
+  }
+
+  message(paste0("Scoring ", res, "..."))
+  mtchs <- dplyr::mutate_all(
+    dplyr::as_tibble(mtchs),
+    function(x) dplyr::if_else(Re(x) > 0, percent_match(x), 0)
+  )
+
+  # Now calculate silhouette scores
+  message(paste0("Silhouette ", res, "..."))
+  sil <- cluster::silhouette(
+    x = as.numeric(as.character(unlist(clusters))),
+    dmatrix = (1 - as.matrix(mtchs))
+  )
+  saveRDS(sil, paste0(results_path, "silhouette_", res, ".rds"))
+
+  # Finally, calculate grouped metrics
+  message(paste0("Grouping ", res, "..."))
+  grp <- group_scores(mtchs, unlist(clusters))
+  saveRDS(grp, paste0(results_path, "frequency_grouped_", res, ".rds"))
+  sil <- group_sil(sil, res)
+  saveRDS(sil, paste0(results_path, "silhouette_grouped_", res, ".rds"))
+}
+
+
+```
+
+## Plot {.tabset .tabset-pills}
+
+```{r prep_plot}
+
+
+# Create silhouette plot
+# Read in scores and calculate CIs
+scores <- purrr::map(
+  paste0(results_path, "silhouette_grouped_", resolutions, ".rds"),
+  readRDS
+)
+
+
+
+
+scores <- dplyr::bind_rows(scores) %>%
+  dplyr::group_by(res) %>%
+  dplyr::mutate("n_clusters" = dplyr::n()) %>%
+  dplyr::ungroup()
+meds <- scores %>%
+  dplyr::group_by(res) %>%
+  dplyr::summarise(
+    "boot" = list(boot_median(avg_sil)),
+    "n_clusters" = mean(n_clusters)
+  ) %>%
+  tidyr::unnest_wider(boot)
+
+writexl::write_xlsx(meds, paste0(results_path, "median_ci.xlsx"))
+
+# Find thresholds
+threshold <- max(meds$low_med)
+choice <- as.character(
+  meds %>%
+  dplyr::filter(med >= threshold) %>%
+  dplyr::arrange(n_clusters) %>%
+  tail(n = 1) %>%
+  dplyr::pull(res)
+)
+
+
+```
+
+### Silhouette distribution
+
+```{r plot, results='asis'}
+
+# And plot!
+ggplot(meds, aes(factor(res), med)) +
+  geom_crossbar(
+    aes(ymin = low_med, ymax = high_med),
+    fill = "grey",
+    size = 0.25
+  ) +
+  geom_hline(aes(yintercept = threshold), colour = "blue") +
+  geom_vline(aes(xintercept = choice), colour = "red") +
+  geom_jitter(
+    data = scores,
+    aes(factor(res), avg_sil),
+    size = 0.35,
+    width = 0.15
+  ) +
+  scale_x_discrete("Resolution") +
+  scale_y_continuous(
+    "Silhouette Score",
+    expand = c(0, 0),
+    limits = c(-1, 1),
+    breaks = seq(-1, 1, 0.25),
+    oob = scales::squish
+  ) +
+  cowplot::theme_minimal_hgrid() +
+  theme(
+    axis.title = element_text(size = 8),
+    axis.text = element_text(size = 7),
+    axis.line.x = element_line(colour = "black"),
+    axis.line.y = element_line(colour = "black"),
+    axis.ticks = element_line(colour = "black"),
+  )
+
+ggsave(
+  filename = paste0(results_path, "silhouette_distribution_plot.png"),
+  dpi = 300,
+  height = 3.5,
+  width = 3.5,
+  units = "in"
+)
+
+```
+
+### Dot plot
+
+```{r dot_plot, results='asis'}
+
+# Finally, a dot plot of silhouette scores to help identify less robust clusters
+# The initial pipe is to order the clusters by silhouette score
+scores %>%
+  dplyr::filter(res == choice) %>%
+  dplyr::arrange(dplyr::desc(avg_sil)) %>%
+  dplyr::mutate_at("cluster", ordered, levels = .$cluster) %>%
+  ggplot(aes(factor(cluster), avg_sil)) +
+    geom_point() +
+    scale_x_discrete("Cluster") +
+    scale_y_continuous(
+      "Silhouette Score",
+      expand = c(0, 0),
+      limits = c(-1, 1),
+      breaks = seq(-1, 1, 0.25),
+      oob = scales::squish
+    ) +
+    cowplot::theme_minimal_grid() +
+    theme(
+      axis.title = element_text(size = 8),
+      axis.text = element_text(size = 7),
+      axis.line.x = element_line(colour = "black"),
+      axis.line.y = element_line(colour = "black"),
+      axis.ticks = element_line(colour = "black"),
+    )
+
+ggsave(
+  filename = paste0(results_path, "silhouette_point_plot_", choice, ".png"),
+  dpi = 300,
+  height = 3.5,
+  width = 3.5,
+  units = "in"
+)
+
+
+```
+
+## Save the clustered seurat object
+
+```{r save}
+
+# Save original data, with ground truth labels
+saveRDS(obj, paste0(results_path, "clustered_data.rds"))
+cat('Done saving seurat object.')
+
+```
+
+## Co-clustering {.tabset, tabset-pills}
+
+```{r coclustering}
+
+# First is a cluster average co-clustering heatmap
+# Read the data
+grp <- readRDS(paste0(results_path, "frequency_grouped_", choice, ".rds"))
+
+# As the data is symmetrical, we do not need the upper triangle
+grp <- grp %>%
+  pivot_wider(names_from = "cell_2", values_from = "avg_percent") %>%
+  select(str_sort(colnames(.), numeric = T)) %>%
+  column_to_rownames("cell_1")
+grp[lower.tri(grp)] <- NA
+grp <- grp %>%
+  as_tibble(rownames = "cell_1") %>%
+  pivot_longer(-cell_1, names_to = "cell_2", values_to = "avg_percent") %>%
+  mutate_at("cell_2", ordered, levels = unique(.$cell_1)) %>%
+  mutate_at("cell_1", ordered, levels = unique(.$cell_1))
+
+```
+
+### Heatmap
+
+```{r heatmap, results='asis'}
+
+# And plot!
+plot <- ggplot(grp, aes(factor(cell_1), cell_2, fill = avg_percent)) +
+  geom_tile() +
+  scale_x_discrete("Cluster", expand = c(0, 0)) +
+  scale_y_discrete(
+    "Cluster",
+    limits = rev(levels(grp$cell_2)),
+    expand = c(0, 0)
+  ) +
+  scale_fill_distiller(
+    " ",
+    limits = c(0, 1),
+    breaks = c(0, 0.5, 1),
+    palette = "RdYlBu",
+    na.value = "white"
+  ) +
+  coord_fixed() +
+  theme(
+    axis.ticks = element_line(colour = "black"),
+    axis.text = element_text(size = 6),
+    axis.title = element_text(size = 8),
+    legend.text = element_text(size = 7),
+    legend.position = c(0.9, 0.9)
+  ) +
+  guides(fill = guide_colorbar(barheight = 3, barwidth = 1))
+
+ggsave(
+  plot = plot,
+  filename = paste0(results_path, "coclustering_heatmap_", choice, ".png"),
+  dpi = 300,
+  height = 3.5,
+  width = 3.5,
+  units = "in"
+)
+
+```
+
+## Silhouette score {.tabset .tabset-pills}
+
+```{r silhouette_score}
+
+# Let's add the silhouette scores to the Seurat object!
+sil_scores <- readRDS(paste0(results_path, "silhouette_", choice, ".rds"))
+sil_scores <- as.data.frame(sil_scores[, 3], row.names = Seurat::Cells(obj))
+colnames(sil_scores) <- c("sil_score")
+obj <- AddMetaData(obj, metadata = sil_scores)
+
+# Let's visualise the selected cluster
+# If your data has known  clusters, you could also visualise those!
+# Remember, truths are in "glue({reduction}.{assay}_res.{choice})"
+# Seurat Changes color scheme if you order your data, so we provide
+# the following helper function to restore defaults
+gg_color <- function(n) {
+  hues <- seq(15, 375, length = n + 1)
+  colours <- hcl(h = hues, c = 100, l = 65)[1:n]
+  return(colours)
+}
+
+
+```
+
+### UMAP
+
+```{r umap, results='asis'}
+
+plot <- DimPlot(
+  obj,
+  reduction = "umap",
+  group.by = glue::glue("{reduction}.{assay}_res.{choice}"),
+  pt.size = 0.5,
+  # cols = gg_color(6) # Only necessary if you have ordered your clusters
+)
+
+ggsave(
+  plot = plot,
+  filename = paste0(results_path, choice, "_cluster_umap.png"),
+  dpi = 300,
+  height = 5,
+  width = 5,
+  units = "in"
+)
+
+plot
+
+```
+
+### UMAP with the silouette scores
+
+```{r umap_silscores, results='asis'}
+
+# We also find it useful to visualise the silhouette scores on the UMAP!
+plot <- FeaturePlot(
+  obj,
+  "sil_score",
+  reduction = "umap",
+  pt.size = 0.5,
+  min.cutoff = -1,
+  max.cutoff = 1
+) +
+  scale_colour_distiller(
+    palette = "RdYlBu",
+    labels = c(-1, 0, 1),
+    breaks = c(-1, 0, 1),
+    limits = c(-1, 1)
+  )
+
+
+plot
+
+ggsave(
+  plot = plot,
+  filename = paste0(results_path, choice, "_silhouette_umap.png"),
+  dpi = 300,
+  height = 5,
+  width = 5,
+  units = "in"
+)
+
+```
+
+### Cluster heatmap
+
+```{r cluster_heatmap, results='asis'}
+
+# This dataset does have annotated cell types, so we can create a heatmap
+# to see how well they line up. Remember, "truths" will always be in
+# glue::glue("{reduction}.{assay}_res.{choice}"), but annotated cell types
+# might be in different locations. Be sure to change the names as needed.
+ids <- as_tibble(
+    obj[[c(glue::glue("{reduction}.{assay}_res.{choice}"), "CellType")]]
+  ) %>%
+  mutate_at(
+    c(glue::glue("{reduction}.{assay}_res.{choice}"), "CellType"),
+    as.factor
+  ) %>%
+  group_by(pca.SCT_res.1.6, CellType) %>%
+  summarise("count" = n()) %>%
+  ungroup() %>%
+  complete(pca.SCT_res.1.6, CellType, fill = list("count" = 0)) %>%
+  # Count suggested clusters
+  group_by(pca.SCT_res.1.6) %>%
+  mutate("n_suggested" = sum(count)) %>%
+  ungroup() %>%
+  # Count known clusters
+  group_by(CellType) %>%
+  mutate("n_known" = sum(count)) %>%
+  ungroup() %>%
+  # Calculate statistics
+  mutate("dice" = (2 * count) / (n_suggested + n_known)) %>%
+  mutate(
+    "pca.SCT_res.1.6" = fct_reorder(pca.SCT_res.1.6, dice, max, .desc = TRUE),
+    "CellType" = fct_reorder(CellType, dice, max, .desc = TRUE)
+  )
+
+plot <- ggplot(ids, aes(pca.SCT_res.1.6, CellType, fill = dice)) +
+  geom_tile() +
+  scale_x_discrete("Suggested Clusters", expand = c(0, 0)) +
+  scale_y_discrete(
+    "Known Clusters",
+    limits = rev(levels(ids$CellType)),
+    expand = c(0, 0)
+  ) +
+  coord_fixed() +
+  scale_fill_distiller(
+    NULL,
+    limits = c(0, 1),
+    breaks = c(0, 0.5, 1),
+    palette = "RdYlBu"
+  ) +
+  theme(
+    axis.ticks = element_line(colour = "black"),
+    axis.text = element_text(size = 6),
+    axis.title = element_text(size = 8),
+    legend.text = element_text(size = 7),
+  ) +
+  guides(fill = guide_colorbar(barheight = 3, barwidth = 0.5))
+
+
+plot
+
+ggsave(
+  plot = plot,
+  filename = paste0(results_path, "cluster_relation_heatmap.png"),
+  dpi = 300,
+  height = 3.5,
+  width = 3.5,
+  units = "in"
+)
+
+```
+
+## Session info
+
+```{r session_info}
+
+sessionInfo()
+
+```
+
