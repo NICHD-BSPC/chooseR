@@ -448,6 +448,9 @@ plot
 
 ```{r umap_silscores, results='asis'}
 
+# Run UMAP
+obj <- RunUMAP(obj, dims=1:10)
+
 # We also find it useful to visualise the silhouette scores on the UMAP!
 plot <- FeaturePlot(
   obj,
