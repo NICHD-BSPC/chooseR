@@ -27,7 +27,7 @@ conda -p ./env --file requirements.txt
 conda activate ./env
 
 # Run chooseR
-Rscript -e "rmarkdown::render('examples/chooser.Rmd', output_file='results/report.html')"
+Rscript -e "rmarkdown::render('examples/chooser.Rmd', output_dir='../results')"
 ```
 
 ## Outputs
