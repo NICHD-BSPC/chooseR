@@ -31,7 +31,7 @@ library(Matrix)
 library(future)
 
 # Set correct paths
-source("/data/BSPC-Petros/multiome-mira/chooser/R/var.R")
+source("../R/var.R")
 ```
 
 ## Set parallelization
