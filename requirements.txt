@@ -165,3 +165,4 @@ bioconductor-biocgenerics
 bioconductor-multtest
 
 r-signac
+mamba
