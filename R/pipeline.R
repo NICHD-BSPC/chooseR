@@ -1,6 +1,6 @@
 # Functions used directly in the analysis and example script
 
-source("/data/BSPC-Petros/multiome-mira/chooser/R/helper_functions.R")
+source("../R/helper_functions.R")
 
 #' Run multiple clusters on the same Seurat Object
 #'
