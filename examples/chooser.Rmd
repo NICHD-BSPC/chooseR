@@ -28,11 +28,34 @@ library(Signac)
 library(Seurat)
 library(knitr)
 library(Matrix)
+library(future)
 
 # Set correct paths
 source("/data/BSPC-Petros/multiome-mira/chooser/R/var.R")
 ```
 
+## Set parallelization
+
+- Parallelization in this workflow uses the [future](https://cran.r-project.org/web/packages/future/index.html) package. 
+
+- Reference: [Parallelization in Seurat with future](https://satijalab.org/seurat/articles/future_vignette.html), [Using the parallel package on Biowulf](https://hpc.nih.gov/apps/R.html)
+
+
+
+```{r parallelize, include=FALSE}
+
+# Assign the number of cores for parallelization
+ncpus <- future::availableCores()
+
+# Adjust max memory allowed
+options(future.globals.maxSize=48000 * 1024^2,
+        mc.cores=ncpus)
+
+# Parallelize the run
+plan("multicore", workers=ncpus)
+
+
+```
 
 ## Load Seurat object
 
@@ -423,6 +446,9 @@ gg_color <- function(n) {
 
 ```{r umap, results='asis'}
 
+# Run UMAP
+obj <- RunUMAP(obj, dims=1:10)
+
 plot <- DimPlot(
   obj,
   reduction = "umap",
@@ -448,8 +474,6 @@ plot
 
 ```{r umap_silscores, results='asis'}
 
-# Run UMAP
-obj <- RunUMAP(obj, dims=1:10)
 
 # We also find it useful to visualise the silhouette scores on the UMAP!
 plot <- FeaturePlot(
@@ -481,76 +505,7 @@ ggsave(
 
 ```
 
-### Cluster heatmap
 
-```{r cluster_heatmap, results='asis'}
-
-# This dataset does have annotated cell types, so we can create a heatmap
-# to see how well they line up. Remember, "truths" will always be in
-# glue::glue("{reduction}.{assay}_res.{choice}"), but annotated cell types
-# might be in different locations. Be sure to change the names as needed.
-ids <- as_tibble(
-    obj[[c(glue::glue("{reduction}.{assay}_res.{choice}"), "CellType")]]
-  ) %>%
-  mutate_at(
-    c(glue::glue("{reduction}.{assay}_res.{choice}"), "CellType"),
-    as.factor
-  ) %>%
-  group_by(pca.SCT_res.1.6, CellType) %>%
-  summarise("count" = n()) %>%
-  ungroup() %>%
-  complete(pca.SCT_res.1.6, CellType, fill = list("count" = 0)) %>%
-  # Count suggested clusters
-  group_by(pca.SCT_res.1.6) %>%
-  mutate("n_suggested" = sum(count)) %>%
-  ungroup() %>%
-  # Count known clusters
-  group_by(CellType) %>%
-  mutate("n_known" = sum(count)) %>%
-  ungroup() %>%
-  # Calculate statistics
-  mutate("dice" = (2 * count) / (n_suggested + n_known)) %>%
-  mutate(
-    "pca.SCT_res.1.6" = fct_reorder(pca.SCT_res.1.6, dice, max, .desc = TRUE),
-    "CellType" = fct_reorder(CellType, dice, max, .desc = TRUE)
-  )
-
-plot <- ggplot(ids, aes(pca.SCT_res.1.6, CellType, fill = dice)) +
-  geom_tile() +
-  scale_x_discrete("Suggested Clusters", expand = c(0, 0)) +
-  scale_y_discrete(
-    "Known Clusters",
-    limits = rev(levels(ids$CellType)),
-    expand = c(0, 0)
-  ) +
-  coord_fixed() +
-  scale_fill_distiller(
-    NULL,
-    limits = c(0, 1),
-    breaks = c(0, 0.5, 1),
-    palette = "RdYlBu"
-  ) +
-  theme(
-    axis.ticks = element_line(colour = "black"),
-    axis.text = element_text(size = 6),
-    axis.title = element_text(size = 8),
-    legend.text = element_text(size = 7),
-  ) +
-  guides(fill = guide_colorbar(barheight = 3, barwidth = 0.5))
-
-
-plot
-
-ggsave(
-  plot = plot,
-  filename = paste0(results_path, "cluster_relation_heatmap.png"),
-  dpi = 300,
-  height = 3.5,
-  width = 3.5,
-  units = "in"
-)
-
-```
 
 ## Session info
 
